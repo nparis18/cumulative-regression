@@ -56,7 +56,7 @@ else{
 *-------------------------------------------------------------------------------
 #delimit ;
 mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'",
-				`blocksize',`K',`nocons',`sort',`typeWeight');
+		blocksize',`K',`nocons',`sort',`typeWeight');
 #delimit cr
 
 mata: betas=*(A[1,1])'
@@ -76,7 +76,6 @@ end
 *-------------------------------------------------------------------------------
 *--- (3) Define auxiliary Mata details
 *-------------------------------------------------------------------------------
-
 version 15.0
 
 mata:
@@ -97,13 +96,13 @@ function runcls(string scalar filename,	// File containing data
 				string scalar weight,	// Weight's name variable; Optional
 				string scalar absorb,	// Fe's name variable;	 Optional
 				real scalar blocksize,	// Size in observations for blocks
-				real scalar K,			// Number of dep vars
+				real scalar K,		// Number of dep vars
 				real scalar nocons,
 				real scalar sort,
 				real scalar typeWeight)
 {
 	cons=1-nocons
-	covs=K+cons // Number of actual covs when constand is defined
+	covs=K+cons // Number of actual covs when constant is defined
 
 	// General stucture
 	struct resultsCLS scalar r
@@ -112,7 +111,6 @@ function runcls(string scalar filename,	// File containing data
 	r.XX		= J(covs,covs,0)
 
 	txtPos=inputs(filename,arglist,weight,absorb,K)
-	
 
 	if (absorb==""){
 		// Matrix calculations
@@ -207,10 +205,10 @@ function runcls(string scalar filename,	// File containing data
 //------------------------------------------------------------------------------
 
 struct resultsCLS matrix inputs(string scalar filename,
-								string scalar arglist,
-								string scalar weight,
-								string scalar absorb,
-								real scalar K)
+				string scalar arglist,
+				string scalar weight,
+				string scalar absorb,
+				real scalar K)
 {
 	fh = fopen(filename,"r")
 	names = fget(fh)
@@ -218,9 +216,9 @@ struct resultsCLS matrix inputs(string scalar filename,
 
 	// Match text and user variables positions
 	dataNames=tokens(subinstr(names,",", " "))	// Names from textfile
-	userNames=tokens(arglist)					// Names from user
-	varIdx=_aandb(dataNames,userNames)			// Match btw (index)
-	varPos=selectindex(varIdx)					// Positions
+	userNames=tokens(arglist)			// Names from user
+	varIdx=_aandb(dataNames,userNames)		// Match btw (index)
+	varPos=selectindex(varIdx)			// Positions
 
 	/*
 	The folowing lines of code causes a slowdown in the performance, since we got
@@ -249,12 +247,12 @@ struct resultsCLS matrix inputs(string scalar filename,
 }
 
 struct resultsCLS matrix ols(string scalar filename,
-							 pointer position,
-							 real scalar K,
-							 real scalar cons,
-							 real scalar blocksize,
-							 real scalar typeWeight,
-							 struct resultsCLS scalar j)
+				pointer position,
+				real scalar K,
+				real scalar cons,
+				real scalar blocksize,
+				real scalar typeWeight,
+				struct resultsCLS scalar j)
 {
 	// General information from the model
 	real scalar	i
@@ -370,30 +368,30 @@ return(j)
 }
 
 
-// struct resultsCLS matrix clusterFunOLS(	pointer data,
-// 										string scalar filename,
-// 										string scalar arglist,
-// 										string scalar weight,
-// 										string scalar absorb,
-// 										real scalar K,
-// 										real scalar cons,
-// 										real scalar blocksize,
-// 										real scalar sort)
+// struct resultsCLS matrix clusterFunOLS(pointer data,
+// 						string scalar filename,
+// 						string scalar arglist,
+// 						string scalar weight,
+// 						string scalar absorb,
+// 						real scalar K,
+// 						real scalar cons,
+// 						real scalar blocksize,
+// 						real scalar sort)
 // {
 // 	real scalar	i,itera
 // 	i=itera=1
 // 	fh = fopen(filename,"r")
 // 	names = fget(fh)
 // 	dataNames=tokens(subinstr(names,",", " "))	// Names from textfile
-// 	userNames=tokens(arglist)					// Names from user
-// 	weightName=tokens(weight)					// Name  from weight
-// 	FeName=tokens(absorb)						// Name  from Fe
+// 	userNames=tokens(arglist)			// Names from user
+// 	weightName=tokens(weight)			// Name  from weight
+// 	FeName=tokens(absorb)				// Name  from Fe
 //
-// 	varIdx=_aandb(dataNames,userNames)			// Match btw (index)
+// 	varIdx=_aandb(dataNames,userNames)		// Match btw (index)
 // 	wgtIdx=_aandb(dataNames,weightName)
 // 	FeIdx=_aandb(dataNames,FeName)
 //
-// 	varPos=selectindex(varIdx)					// Positions
+// 	varPos=selectindex(varIdx)			// Positions
 // 	XPos=varPos[.,2..K+1]
 // 	Ypos=varPos[.,1]
 // 	Wpos=selectindex(wgtIdx)
@@ -692,6 +690,4 @@ struct resultsCLS matrix locationOLS(scalar Tgroup, scalar K, scalar cons)
 	}
 	return(Index)
 }
-
-
 end
