@@ -20,7 +20,6 @@ syntax namelist(min=2),
 ;
 #delimit cr
 
-
 *-------------------------------------------------------------------------------
 *--- (1) Unpack syntax
 *-------------------------------------------------------------------------------
@@ -56,8 +55,7 @@ else{
 *--- (2) Run runcls and report output
 *-------------------------------------------------------------------------------
 #delimit ;
-mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'",
-		blocksize',`K',`nocons',`sort',`typeWeight');
+mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'",`blocksize',`K',`nocons',`sort',`typeWeight');
 #delimit cr
 
 mata: betas=*(A[1,1])'
@@ -113,6 +111,7 @@ function runcls(string scalar filename,	// File containing data
 
 	txtPos=inputs(filename,arglist,weight,absorb,K)
 
+arglist
 	if (absorb==""){
 		// Matrix calculations
 		r=ols(filename,txtPos,K,cons,blocksize,typeWeight,r)
@@ -122,16 +121,23 @@ function runcls(string scalar filename,	// File containing data
 		
 		XXinv=&(invsym(r.XX))
 		beta=&(*XXinv*r.Xy)
-		
+		*beta
 		// Non-redundant degrees of freedom?
 		KStd=&(colsum((*beta:!=0)))
 		
-		// 'U = (yy - 2BXy) +  B*X'X*B
-		uPu= &(r.yy - 2*(*beta)'*r.Xy + (*beta)'*r.XX**beta)
+		// standard error type
+		if (robust==""){
+			r=olsR(filename,txtPos,K,cons,blocksize,typeWeight,a)
 
-		//Generate variance-covariance matrix
-		// V(B)
-		vcov=&(*uPu/(r.N-*KStd)**XXinv)
+		}
+		else{
+			// 'U = (yy - 2BXy) +  B*X'X*B
+			uPu= &(r.yy - 2*(*beta)'*r.Xy + (*beta)'*r.XX**beta)
+
+			//Generate variance-covariance matrix
+			// V(B)
+			vcov=&(*uPu/(r.N-*KStd)**XXinv)
+		}
 	}
 
 
@@ -217,12 +223,14 @@ struct resultsCLS matrix inputs(string scalar filename,
 
 	// Match text and user variables positions
 	dataNames=tokens(subinstr(names,",", " "))	// Names from textfile
+	dataNames
 	userNames=tokens(arglist)			// Names from user
-	varIdx=_aandb(dataNames,userNames)		// Match btw (index)
+	varIdx=_aandb(dataNames,userNames)		// Match btwn (index)
+	varIdx
 	varPos=selectindex(varIdx)			// Positions
-
+varPos
 	/*
-	The folowing lines of code causes a slowdown in the performance, since we got
+	The folowing lines of code causes a slowdown in performance, since we got
 	the positions of covs. For instance XPos might be (1,7,6,9,6). That vector enters
 	as subscript in the data. Because is not a sequence there will be a slowdown
 	*/
@@ -272,6 +280,7 @@ struct resultsCLS matrix ols(string scalar filename,
 		while((line=fget(fh)) != J(0,0,"")) {
 			vecline	= strtoreal(tokens(subinstr(line,",", " ")))
 			(*data)[i,.]=vecline
+
 			if (i==blocksize) {
 				y = &((*data)[.,Ypos])
 				X = &((*data)[.,Xpos])
@@ -324,7 +333,7 @@ struct resultsCLS matrix ols(string scalar filename,
 				wp = &((*data)[.,Wpos])
 				j.N=j.N+i
 
-				j=CLS_W(Xp,yp,wp,i,cons,j)
+				j=CLS_W(Xp,yp,wp,cons,j)
 			}
 		}
 		else{
@@ -368,6 +377,127 @@ fclose(fh)
 return(j)
 }
 
+struct resultsCLS matrix olsR(string scalar filename,
+				pointer position,
+				real scalar K,
+				real scalar cons,
+				real scalar blocksize,
+				real scalar typeWeight,
+				struct resultsCLS scalar j)
+{
+	// General information from the model
+	real scalar	i
+	i=1
+	wMarker=rows(position)
+	newMtxCols=K+3
+	fh=*(position[1])
+
+	//Define data
+	data=&(J(blocksize,newMtxCols,.))
+	Ypos=*(position[2])
+	Xpos=*(position[3])
+
+	// Read in data
+	if(wMarker!=4){
+		while((line=fget(fh)) != J(0,0,"")) {
+			vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+			(*data)[i,.]=vecline
+
+			if (i==blocksize) {
+				y = &((*data)[.,Ypos])
+				X = &((*data)[.,Xpos])
+				j.N=j.N+i
+				
+				j=CLS(X,y,cons,j)
+				i=0
+				(*data)=J(blocksize,newMtxCols,.)
+			}
+			++i
+		}
+		//This captures any overflow after last block (matrices aren't reset)
+		if	((*data)[.,1]!=J(blocksize,1,.)){
+			i=i-1
+			datap=&((*data)[1..i,.])
+
+			yp = &((*data)[.,Ypos])
+			Xp = &((*data)[.,Xpos])
+			j.N=j.N+i
+			j=CLS(Xp,yp,cons,j)
+		}
+	}
+	else{
+		Wpos=*(position[4])
+		if(typeWeight==0){
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline
+				if (i==blocksize) {
+				
+					y = &((*data)[.,Ypos])
+					X = &((*data)[.,Xpos])
+					w = &((*data)[.,Wpos])
+					j.N=j.N+i
+
+					j=CLS_W(X,y,w,cons,j)
+					i=0
+					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+			}
+
+			//This captures any overflow after last block (matrices aren't reset)
+			if	((*data)[.,1]!=J(blocksize,1,.)){
+				i=i-1
+				datap=&((*data)[1..i,.])
+
+				yp = &((*data)[.,Ypos])
+				Xp = &((*data)[.,Xpos])
+				wp = &((*data)[.,Wpos])
+				j.N=j.N+i
+
+				j=CLS_W(Xp,yp,wp,cons,j)
+			}
+		}
+		else{
+			j.W= 0
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline
+
+				if (i==blocksize) {
+					y = &((*data)[.,Ypos])
+					X = &((*data)[.,Xpos])
+					w = &((*data)[.,Wpos])
+					
+					j.W=j.W+quadcolsum(*w)
+					j.N=j.N+i
+
+					j=CLS_W(X,y,w,cons,j)
+					i=0
+					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+			}
+			//This captures any overflow after last block (matrices aren't reset)
+			if	((*data)[.,1]!=J(blocksize,1,.)){
+				i=i-1
+				datap=&((*data)[1..i,.])
+
+				yp = &((*data)[.,Ypos])
+				Xp = & ((*data)[.,XPos])
+				wp = &((*data)[.,WPos])
+				j.W =j.W+quadcolsum(*wp)
+				j.N=j.N+i
+
+				j=CLS_W(Xp,yp,wp,i,cons,j)
+			}
+		}
+	}
+
+// Close file, return struct j
+fclose(fh)
+return(j)
+}
 
 // struct resultsCLS matrix clusterFunOLS(pointer data,
 // 						string scalar filename,
@@ -618,11 +748,6 @@ struct resultsCLS scalar CLS(pointer X,
 	r.Xy  =r.Xy+quadcross(*X,cons,*y,0)
 	r.XX  =r.XX+quadcross(*X,cons,*X,cons)
 	r.yy  =r.yy+quadcross(*y,*y)
-	
-// 	a.W   =r.W+quadcolsum(*w)
-// 	a.yy  =r.yy+quadcross(*y,*y)
-// 	a.Ybar=r.Ybar+quadcross(*w,*y)
-// 	a.Xbar=r.Xbar+quadcross(*w,*X)
 	return(r)
 }
 
