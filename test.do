@@ -1,7 +1,6 @@
-********************************************************************************
+**********************************************************************************
 *Cumulative OLS Testing
 ********************************************************************************
-
 clear all
 set more off, permanently
 matrix drop _all
@@ -18,7 +17,7 @@ set scheme cleanplots
 
 }
 
-gl source  "${direc}/source"
+gl source  "${direc}/cumulative-regression"
 gl data  "${direc}/data"
 
 
@@ -39,9 +38,9 @@ gl blocksize=10
 * Testing
 *******************************************************************************
 
-cumulativels price length mpg , filename("$data/testData.raw") blocksize($blocksize)
-reg price length mpg
+cumulativels price length mpg, filename("$data/testData.raw") blocksize($blocksize) nocons
+reg price length mpg,nocon
 
-cumulativels price mpg length, filename("$data/testData.raw") blocksize($blocksize) aw(weight)
+cumulativels price mpg length, filename("$data/testData.raw") blocksize($blocksize) aw(weight) nocons
 
-reg price length mpg [aw=weight]
+reg price length mpg [aw=weight], nocons

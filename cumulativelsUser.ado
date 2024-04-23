@@ -30,12 +30,15 @@ if "`sort'"=="sort" {
 else local sort=0
 
 local typeWeight = 0
+local wMarker = 0
 if length("`aweight'")!= 0 {
     local weight "`aweight'"
+	local wMarker = 1
 }
 else if length("`fweight'") != 0 {
     local weight "`fweight'"
     local typeWeight = 1
+	local wMarker = 1
 }
 
 loc K1 : word count `namelist'
@@ -54,24 +57,26 @@ else{
 *-------------------------------------------------------------------------------
 *--- (2) Run runcls and report output
 *-------------------------------------------------------------------------------
+// NP: This definitely needs some tidying up; there are too many parentheses and extra steps
 #delimit ;
-mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'",`blocksize',`K',`nocons',`sort',`typeWeight');
+mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'",`blocksize',`K',`nocons',`sort',`typeWeight',`wMarker');
 #delimit cr
 
-mata: betas=*(A[1,1])'
-mata: vcov=*(A[1,2])
+mata: betas=(*((*(A[1]))[1]))'
+mata: vcov=*((*(A[1]))[2])
+mata: N=*(A[2])
 
 mata: st_matrix("b", betas)
 mata: st_matrix("V", vcov)
+mata: st_local("N", strofreal(N))
 
-matrix colnames b  = `Xlist'
-matrix colnames V  = `Xlist'
-matrix rownames V  = `Xlist'
+matrix colnames b = `Xlist'
+matrix colnames V = `Xlist'
+matrix rownames V = `Xlist'
 
-ereturn post b V , dep(`Ylist') obs(23830)
+ereturn post b V, dep(`Ylist') obs(`N')
 ereturn display
 end
-
 *-------------------------------------------------------------------------------
 *--- (3) Define auxiliary Mata details
 *-------------------------------------------------------------------------------
@@ -98,7 +103,8 @@ function runcls(string scalar filename,	// File containing data
 				real scalar K,		// Number of dep vars
 				real scalar nocons,
 				real scalar sort,
-				real scalar typeWeight)
+				real scalar typeWeight,
+				real scalar wMarker)
 {
 	cons=1-nocons
 	covs=K+cons // Number of actual covs when constant is defined
@@ -111,17 +117,16 @@ function runcls(string scalar filename,	// File containing data
 
 	txtPos=inputs(filename,arglist,weight,absorb,K)
 
-arglist
 	if (absorb==""){
 		// Matrix calculations
-		r=ols(filename,txtPos,K,cons,blocksize,typeWeight,r)
+		r=ols(filename,txtPos,K,cons,blocksize,typeWeight,wMarker,r)
 		
 		// Compute results
 		/* I was thinking we can create a new subrutine for computing beta and sd*/
 		
 		XXinv=&(invsym(r.XX))
 		beta=&(*XXinv*r.Xy)
-		*beta
+		
 		// Non-redundant degrees of freedom?
 		KStd=&(colsum((*beta:!=0)))
 		
@@ -139,9 +144,9 @@ arglist
 			vcov=&(*uPu/(r.N-*KStd)**XXinv)
 		}
 	}
-
-
-	output=(beta,vcov)
+	outputMain=&(beta,vcov)
+	outputArg=&(r.N)
+	output=(outputMain,outputArg)
 	return(output)
 	
 // 	beta=&(*XXinv**Xy_total)
@@ -223,20 +228,17 @@ struct resultsCLS matrix inputs(string scalar filename,
 
 	// Match text and user variables positions
 	dataNames=tokens(subinstr(names,",", " "))	// Names from textfile
-	dataNames
 	userNames=tokens(arglist)			// Names from user
-	varIdx=_aandb(dataNames,userNames)		// Match btwn (index)
-	varIdx
-	varPos=selectindex(varIdx)			// Positions
-varPos
-	/*
+	varsPos=inlist_aposb(dataNames,userNames) // Positions
+
+	/* 
 	The folowing lines of code causes a slowdown in performance, since we got
 	the positions of covs. For instance XPos might be (1,7,6,9,6). That vector enters
-	as subscript in the data. Because is not a sequence there will be a slowdown
+	as subscript in the data. Because is not a sequence there will be a slowdownx	
 	*/
 
-	Ypos=&(varPos[.,1])
-	XPos=&(varPos[.,2..K+1])
+	Ypos=&(varsPos[.,1])
+	XPos=&(varsPos[.,2..K+1])
 	positions=(filePos\ Ypos \ XPos)
 
 	if (absorb!=""){
@@ -249,7 +251,14 @@ varPos
 		weightName=tokens(weight)		// Name from weight
 		wgtIdx=_aandb(dataNames,weightName)
 		Wpos=&selectindex(wgtIdx)
-		positions=(positions \ Wpos)
+		if (cols(*Wpos)==1){
+			positions=(positions \ Wpos)
+		}
+		else{
+            displayas("error")
+            printf("%s not found\n", weightName)
+            exit(601)			
+		}
 	}
 
 	return(positions)
@@ -261,29 +270,30 @@ struct resultsCLS matrix ols(string scalar filename,
 				real scalar cons,
 				real scalar blocksize,
 				real scalar typeWeight,
+				real scalar wMarker,
 				struct resultsCLS scalar j)
 {
 	// General information from the model
 	real scalar	i
 	i=1
-	wMarker=rows(position)
-	newMtxCols=K+3
 	fh=*(position[1])
 
 	//Define data
-	data=&(J(blocksize,newMtxCols,.))
 	Ypos=*(position[2])
 	Xpos=*(position[3])
+	Xlast=K+1
+	newMtxCols=Xlast+wMarker
+	data=&(J(blocksize,newMtxCols,.))
 
 	// Read in data
-	if(wMarker!=4){
+	if(wMarker!=1){
+	    Argpos=(Ypos,Xpos)
 		while((line=fget(fh)) != J(0,0,"")) {
 			vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-			(*data)[i,.]=vecline
-
+			(*data)[i,.]=vecline[Argpos]
 			if (i==blocksize) {
-				y = &((*data)[.,Ypos])
-				X = &((*data)[.,Xpos])
+				y = &((*data)[.,1])
+				X = &((*data)[.,2..Xlast])
 				j.N=j.N+i
 				
 				j=CLS(X,y,cons,j)
@@ -297,23 +307,25 @@ struct resultsCLS matrix ols(string scalar filename,
 			i=i-1
 			datap=&((*data)[1..i,.])
 
-			yp = &((*data)[.,Ypos])
-			Xp = &((*data)[.,Xpos])
+			yp = &((*data)[.,1])
+			Xp = &((*data)[.,2..Xlast])
 			j.N=j.N+i
 			j=CLS(Xp,yp,cons,j)
 		}
 	}
 	else{
 		Wpos=*(position[4])
+		Argpos=(Ypos,Xpos,Wpos)
+		Wlast=Xlast+1
 		if(typeWeight==0){
 			while((line=fget(fh)) != J(0,0,"")) {
 				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-				(*data)[i,.]=vecline
-				if (i==blocksize) {
+				(*data)[i,.]=vecline[Argpos]
 				
-					y = &((*data)[.,Ypos])
-					X = &((*data)[.,Xpos])
-					w = &((*data)[.,Wpos])
+				if (i==blocksize) {
+					y = &((*data)[.,1])
+					X = &((*data)[.,2..Xlast])
+					w = &((*data)[.,Wlast])
 					j.N=j.N+i
 
 					j=CLS_W(X,y,w,cons,j)
@@ -328,9 +340,9 @@ struct resultsCLS matrix ols(string scalar filename,
 				i=i-1
 				datap=&((*data)[1..i,.])
 
-				yp = &((*data)[.,Ypos])
-				Xp = &((*data)[.,Xpos])
-				wp = &((*data)[.,Wpos])
+				yp = &((*data)[.,1])
+				Xp = &((*data)[.,2..Xlast])
+				wp = &((*data)[.,Wlast])
 				j.N=j.N+i
 
 				j=CLS_W(Xp,yp,wp,cons,j)
@@ -759,7 +771,7 @@ struct resultsCLS scalar CLS_W(	pointer X,
 {
 	r.Xy  =r.Xy+quadcross(*X,cons,*w,*y,0)
 	r.XX  =r.XX+quadcross(*X,cons,*w,*X,cons)
-	r.yy  =r.yy+quadcross(*y,*y)
+	r.yy  =r.yy+quadcross(*y,*w,*y)
 // 	a.W   =r.W+quadcolsum(*w)
 // 	a.Ybar=r.Ybar+quadcross(*w,*y)
 // 	a.Xbar=r.Xbar+quadcross(*w,*X)
@@ -767,26 +779,26 @@ struct resultsCLS scalar CLS_W(	pointer X,
 }
 
 
-real colvector vec_inlistOLS(pointer B, colvector L)
+real rowvector inlist_aposb(rowvector B, rowvector A)
 {
-    real colvector b, l
-    real scalar minrows, answer
-    
-    b = J(max(*B), 1, 0)
-    b[*B] = J(rows(*B), 1, 1)
-    
-    l = J(max(L), 1, 0)
-    l[L] = J(rows(L), 1, 1)
-    
-    minrows = min((rows(b), rows(l)))
-    answer = J(rows(b), 1, 0)
-    answer[|1, 1 \ minrows, 1 |] =
-        b[|1, 1 \ minrows, 1 |] :* l[|1, 1 \ minrows, 1 |]
-    
-    answer= answer[*B]
-    return(answer)
-}
+    real scalar                                     i
+    real rowvector                                  R
 
+    R = J(1,cols(A),0)
+
+    for (i=1; i<=cols(A); i++) {
+        pos= selectindex(_aposb(A[1,i],B))
+        if (cols(pos)==1){
+            R[1,i] = pos         
+        }
+        else{
+            displayas("error")
+            printf("variable %s not found\n", A[1,i])
+            exit(601)
+        }
+    }
+    return(R)
+}
 struct resultsCLS matrix locationOLS(scalar Tgroup, scalar K, scalar cons) 
 {
 	real scalar j
