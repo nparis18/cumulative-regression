@@ -7,15 +7,15 @@ version 15.0
 *--- (0) Syntax diagram
 *-------------------------------------------------------------------------------
 #delimit;
-syntax namelist(min=2),
+syntax anything,
     filename(string)
     BLOCKsize(integer)
     [
 	noCONStant
 	sort
-	FWeight(string)
-	AWeight(string)
 	ABSorb(string)
+	Robust
+	CLuster(string)
 	]
 ;
 #delimit cr
@@ -29,18 +29,30 @@ if "`sort'"=="sort" {
 }
 else local sort=0
 
-local typeWeight = 0
-local wMarker = 0
-if length("`aweight'")!= 0 {
-    local weight "`aweight'"
-	local wMarker = 1
+if length(`"`cluster'"')!=0 {
+	local clMarker = 1
 }
-else if length("`fweight'") != 0 {
-    local weight "`fweight'"
-    local typeWeight = 1
+else local clMarker=0
+
+if ustrregexm("`anything'", "\((.*?)\)"){
+    local match "`=ustrregexs(1)'"
+	local matchC : subinstr local match "=" " "
+	local typeWeight = ustrregexm("fweight","`: word 1 of `matchC''")
+	local weight: word 2 of `matchC'
 	local wMarker = 1
+	local rError = ustrregexm("pweight","`: word 1 of `matchC''")
+}
+else{
+	local typeWeight = 0
+	local wMarker = 0
+	local rError = 0
 }
 
+if length(`"`robust'"')!=0 {
+	local rError = 1
+}
+
+local namelist = subinstr("`anything'", "(`match')", "",.)
 loc K1 : word count `namelist'
 loc K = `K1'-1
 loc arglist `namelist'
@@ -59,7 +71,7 @@ else{
 *-------------------------------------------------------------------------------
 // NP: This definitely needs some tidying up; there are too many parentheses and extra steps
 #delimit ;
-mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'",`blocksize',`K',`nocons',`sort',`typeWeight',`wMarker');
+mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'","`cluster'",`blocksize',`K',`nocons',`sort',`typeWeight',`wMarker',`clMarker',`rError');
 #delimit cr
 
 mata: betas=(*((*(A[1]))[1]))'
@@ -86,11 +98,10 @@ mata:
 struct resultsCLS 
 {
 	//---------------------- derived
-	real scalar yy,N,W,Ybar
-	real colvector Xy
+	real scalar yy,size,Ybar
+	real colvector Xy,Xgug
 	real matrix XX,Xbar
 }
-
 
 //------------------------------------------------------------------------------
 //--- (4) Main wrapper function
@@ -99,117 +110,81 @@ function runcls(string scalar filename,	// File containing data
 				string scalar arglist,	// String containing var names
 				string scalar weight,	// Weight's name variable; Optional
 				string scalar absorb,	// Fe's name variable;	 Optional
+				string scalar cluster,	// Fe's name variable;	 Optional
 				real scalar blocksize,	// Size in observations for blocks
-				real scalar K,		// Number of dep vars
+				real scalar K,			// Number of dep vars
 				real scalar nocons,
 				real scalar sort,
 				real scalar typeWeight,
-				real scalar wMarker)
+				real scalar wMarker,				
+				real scalar clMarker,
+				real scalar rError)
 {
 	cons=1-nocons
 	covs=K+cons // Number of actual covs when constant is defined
 
 	// General stucture
 	struct resultsCLS scalar r
-	r.yy=r.N	= 0
+	r.yy=r.size	= 0
 	r.Xy		= J(covs,1,0)
 	r.XX		= J(covs,covs,0)
 
-	txtPos=inputs(filename,arglist,weight,absorb,K)
+	txtPos=inputs(filename,arglist,weight,absorb,cluster,K)
 
 	if (absorb==""){
-		// Matrix calculations
-		r=ols(filename,txtPos,K,cons,blocksize,typeWeight,wMarker,r)
-		
-		// Compute results
+		// matrix calculations
+		r=ols(filename,txtPos,K,cons,blocksize,wMarker,typeWeight,r)
+	
+		// compute results
 		/* I was thinking we can create a new subrutine for computing beta and sd*/
 		
 		XXinv=&(invsym(r.XX))
 		beta=&(*XXinv*r.Xy)
 		
-		// Non-redundant degrees of freedom?
+		// non-redundant degrees of freedom?
 		KStd=&(colsum((*beta:!=0)))
-		
-		// standard error type
-		if (robust==""){
-			r=olsR(filename,txtPos,K,cons,blocksize,typeWeight,a)
 
+		// standard error type
+
+		if (rError==1|clMarker==1){
+			struct resultsCLS scalar r2
+			if (rError==1){
+				r2.XX= J(covs,covs,0)
+				r2=olsR(filename,txtPos,beta,K,cons,blocksize,wMarker,typeWeight,r2)
+				uPuR=&(*XXinv*r2.XX**XXinv)
+				vcov=&(((r.size)/(r.size-*KStd))**uPuR)
+			}
+			else {
+				sdCluster=olsCl(filename,txtPos,beta,K,cons,blocksize,wMarker,typeWeight,sort)
+				sdCluster
+				Ng=length(sdCluster)-1 	 // N° groups
+
+				r2=*(sdCluster[1,1])
+				XgugT=&(transposeonly(r2.Xgug))
+					
+				omegaG= &(quadcross(*XgugT,*XgugT))
+				omegaT=&((*omegaG)[1..covs,1..covs])
+
+				for (j=2; j<=Ng; j++) {
+					r2=*(sdCluster[j,1])
+					i=j-1
+					XgugT=&(transposeonly(r2.Xgug))
+					omegaG= &(quadcross(*XgugT,*XgugT))
+					omegaT=&(*OmegaT + (*Omegas)[1..covs,1..covs])
+				}
+				vcov = (N-1)/(N-*KStd)*(Ng/(Ng-1))**XXinv**omegaT**XXinv
+			}
 		}
 		else{
 			// 'U = (yy - 2BXy) +  B*X'X*B
 			uPu= &(r.yy - 2*(*beta)'*r.Xy + (*beta)'*r.XX**beta)
-
-			//Generate variance-covariance matrix
-			// V(B)
-			vcov=&(*uPu/(r.N-*KStd)**XXinv)
+			vcov=&(((*uPu)/(r.size-*KStd))**XXinv)
 		}
 	}
 	outputMain=&(beta,vcov)
-	outputArg=&(r.N)
+	outputArg=&(r.size)
 	output=(outputMain,outputArg)
 	return(output)
-	
-// 	beta=&(*XXinv**Xy_total)
-	
-// 	//ESTIMATION
-// 	//Enter loop for clustering or repeat estimation
-//
-//	
-// 	Ng=length(groupsAccP) // N° groups
-//
-// 	// Cluster Boostrap & Multi Group OLS
-// 	r1=*(groupsAccP[1,1])
-//	
-// 	// FE ESTIMATION
-//	
-// 	Xbar=&(r1.Xbar/r1.W)
-// 	Ybar=&(r1.Ybar/r1.W)
-//	
-// 	XXbar=&(quadcross(*Xbar,cons,*Xbar,cons)*r1.W)
-// 	yybar=&(quadcross(*Ybar,*Ybar)*r1.W)
-// 	Xybar=&(quadcross(*Xbar,cons,*Ybar,0)*r1.W)
-//	
-// 	r1.XX=r1.XX-*XXbar
-// 	r1.yy=r1.yy-*yybar
-// 	r1.Xy=r1.Xy-*Xybar
-//
-// 	XX_total=&(r1.XX)
-// 	yy_total=&(r1.yy)
-// 	Xy_total=&(r1.Xy)
-// 	N=r1.N
-//	
-// 	for (j=2; j<=Ng; j++) {
-// 		r1=*(groupsAccP[j,1])
-//
-// 		Xbar=&(r1.Xbar/r1.W)
-// 		Ybar=&(r1.Ybar/r1.W)
-// 		XXbar=&(quadcross(*Xbar,cons,*Xbar,cons)*r1.W)
-// 		yybar=&(quadcross(*Ybar,*Ybar)*r1.W)
-// 		Xybar=&(quadcross(*Xbar,cons,*Ybar,0)*r1.W)
-//		
-// 		r1.XX=r1.XX-*XXbar
-// 		r1.Xy=r1.Xy-*Xybar
-// 		r1.yy=r1.yy-*yybar
-//
-// 		XX_total=&(*XX_total+r1.XX)
-// 		yy_total=&(*yy_total+r1.yy)
-// 		Xy_total=&(*Xy_total+r1.Xy)
-// 			   N=N+r1.N
-// 	}
-//
-// 	XXinv=&(invsym(*XX_total))
-// 	beta=&(*XXinv**Xy_total)
-//
-// 	// Non-redundant degrees of freedom?
-// 	KStd=&(colsum((*beta:!=0)))
-// 	// 'U = (yy - 2BXy) +  B*X'X*B
-// 	uPu= (*yy_total - 2*(*beta)'**Xy_total + (*beta)'**XX_total**beta)
-//
-// 	//Generate variance-covariance matrix
-// 	// V(B)
-// 	vcov=&(uPu/(N-*KStd-Ng)**XXinv)
-// // 	namesOutput=(dataNames[varPos])[2..K]
-
 }
 
 //------------------------------------------------------------------------------
@@ -217,10 +192,11 @@ function runcls(string scalar filename,	// File containing data
 //------------------------------------------------------------------------------
 
 struct resultsCLS matrix inputs(string scalar filename,
-				string scalar arglist,
-				string scalar weight,
-				string scalar absorb,
-				real scalar K)
+								string scalar arglist,
+								string scalar weight,
+								string scalar absorb,
+								string scalar cluster,
+								real scalar K)
 {
 	fh = fopen(filename,"r")
 	names = fget(fh)
@@ -260,18 +236,30 @@ struct resultsCLS matrix inputs(string scalar filename,
             exit(601)			
 		}
 	}
+	if (cluster!=""){
+		clusterName=tokens(cluster)		// Name from cluster
+		clusIdx=_aandb(dataNames,clusterName)
+		Cltpos=&selectindex(clusIdx)
+		if (cols(*Cltpos)==1){
+			positions=(positions \ Cltpos)
+		}
+		else{
+            displayas("error")
+            printf("%s not found\n", clusterName)
+            exit(601)			
+		}
+	}
 
 	return(positions)
 }
-
 struct resultsCLS matrix ols(string scalar filename,
-				pointer position,
-				real scalar K,
-				real scalar cons,
-				real scalar blocksize,
-				real scalar typeWeight,
-				real scalar wMarker,
-				struct resultsCLS scalar j)
+							 pointer position,
+							 real scalar K,
+							 real scalar cons,
+							 real scalar blocksize,
+							 real scalar wMarker,
+							 real scalar typeWeight,
+							 struct resultsCLS scalar j)
 {
 	// General information from the model
 	real scalar	i
@@ -286,17 +274,16 @@ struct resultsCLS matrix ols(string scalar filename,
 	data=&(J(blocksize,newMtxCols,.))
 
 	// Read in data
-	if(wMarker!=1){
-	    Argpos=(Ypos,Xpos)
+	if(wMarker==0){
+	    arPos=(Ypos,Xpos)
 		while((line=fget(fh)) != J(0,0,"")) {
 			vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-			(*data)[i,.]=vecline[Argpos]
+			(*data)[i,.]=vecline[arPos]
 			if (i==blocksize) {
 				y = &((*data)[.,1])
 				X = &((*data)[.,2..Xlast])
-				j.N=j.N+i
 				
-				j=CLS(X,y,cons,j)
+				j=CLS(X,y,cons,i,j)
 				i=0
 				(*data)=J(blocksize,newMtxCols,.)
 			}
@@ -309,26 +296,141 @@ struct resultsCLS matrix ols(string scalar filename,
 
 			yp = &((*data)[.,1])
 			Xp = &((*data)[.,2..Xlast])
-			j.N=j.N+i
-			j=CLS(Xp,yp,cons,j)
+			j=CLS(Xp,yp,cons,i,j)
 		}
 	}
 	else{
 		Wpos=*(position[4])
-		Argpos=(Ypos,Xpos,Wpos)
+		arPos=(Ypos,Xpos,Wpos)
 		Wlast=Xlast+1
 		if(typeWeight==0){
 			while((line=fget(fh)) != J(0,0,"")) {
 				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-				(*data)[i,.]=vecline[Argpos]
+				(*data)[i,.]=vecline[arPos]
+
+				if (i==blocksize) {
+					y = &((*data)[.,1])
+					X = &((*data)[.,2..Xlast])
+					w = &((*data)[.,Wlast])
+
+					j=CLS_W(X,y,w,cons,i,j)
+					i=0
+					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+			}
+			//This captures any overflow after last block (matrices aren't reset)
+			if	((*data)[.,1]!=J(blocksize,1,.)){
+				i=i-1
+				datap=&((*data)[1..i,.])
+
+				yp = &((*data)[.,1])
+				Xp = & ((*data)[.,2..Xlast])
+				wp = &((*data)[.,Wlast])
+
+				j=CLS_W(Xp,yp,wp,cons,i,j)
+			}
+		}
+		else{
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[arPos]
+
+				if (i==blocksize) {
+					y = &((*data)[.,1])
+					X = &((*data)[.,2..Xlast])
+					w = &((*data)[.,Wlast])
+					iw=quadcolsum(*w)
+
+					j=CLS_W(X,y,w,cons,iw,j)
+					i=0
+					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+			}
+			//This captures any overflow after last block (matrices aren't reset)
+			if	((*data)[.,1]!=J(blocksize,1,.)){
+				i=i-1
+				datap=&((*data)[1..i,.])
+
+				yp = &((*data)[.,1])
+				Xp = & ((*data)[.,2..Xlast])
+				wp = &((*data)[.,Wlast])
+
+				iw=quadcolsum(*wp)
+				j=CLS_W(Xp,yp,wp,cons,iw,j)
+			}
+		}
+	}
+
+// Close file, return struct j
+fclose(fh)
+return(j)
+}
+struct resultsCLS matrix olsR(string scalar filename,
+				pointer position,
+				pointer beta,
+				real scalar K,
+				real scalar cons,
+				real scalar blocksize,
+				real scalar wMarker,
+				real scalar typeWeight,
+				struct resultsCLS scalar j)
+{
+	// General information from the model
+	real scalar	i
+	i=1
+	fh = fopen(filename,"r")
+	names = fget(fh)
+
+	//Define data
+	Ypos=*(position[2])
+	Xpos=*(position[3])
+	Xlast=K+1
+	newMtxCols=Xlast+wMarker
+	data=&(J(blocksize,newMtxCols,.))
+
+	// Read in data
+	if(wMarker==0){
+	    argPos=(Ypos,Xpos)
+		while((line=fget(fh)) != J(0,0,"")) {
+			vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+			(*data)[i,.]=vecline[argPos]
+			if (i==blocksize) {
+				y = &((*data)[.,1])
+				X = &((*data)[.,2..Xlast])
+				
+				j=CLS_R(X,y,beta,blocksize,cons,j)
+				i=0
+				(*data)=J(blocksize,newMtxCols,.)
+			}
+			++i
+		}
+		//This captures any overflow after last block (matrices aren't reset)
+		if	((*data)[.,1]!=J(blocksize,1,.)){
+			i=i-1
+			datap=&((*data)[1..i,.])
+
+			yp = &((*data)[.,1])
+			Xp = &((*data)[.,2..Xlast])
+			j=CLS_R(Xp,yp,beta,blocksize,cons,j)
+		}
+	}
+	else{
+		Wpos=*(position[4])
+		argPos=(Ypos,Xpos,Wpos)
+		Wlast=Xlast+1
+		if(typeWeight==0){
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
 				
 				if (i==blocksize) {
 					y = &((*data)[.,1])
 					X = &((*data)[.,2..Xlast])
 					w = &((*data)[.,Wlast])
-					j.N=j.N+i
 
-					j=CLS_W(X,y,w,cons,j)
+					j=CLS_RAw(X,y,w,beta,blocksize,cons,j)
 					i=0
 					(*data)=J(blocksize,newMtxCols,.)
 				}
@@ -343,44 +445,38 @@ struct resultsCLS matrix ols(string scalar filename,
 				yp = &((*data)[.,1])
 				Xp = &((*data)[.,2..Xlast])
 				wp = &((*data)[.,Wlast])
-				j.N=j.N+i
 
-				j=CLS_W(Xp,yp,wp,cons,j)
+				j=CLS_RAw(Xp,yp,wp,beta,blocksize,cons,j)
 			}
 		}
 		else{
-			j.W= 0
 			while((line=fget(fh)) != J(0,0,"")) {
 				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-				(*data)[i,.]=vecline
-
+				(*data)[i,.]=vecline[argPos]
+				
 				if (i==blocksize) {
-					y = &((*data)[.,Ypos])
-					X = &((*data)[.,Xpos])
-					w = &((*data)[.,Wpos])
-					
-					j.W=j.W+quadcolsum(*w)
-					j.N=j.N+i
+					y = &((*data)[.,1])
+					X = &((*data)[.,2..Xlast])
+					w = &((*data)[.,Wlast])
 
-					j=CLS_W(X,y,w,cons,j)
+					j=CLS_RFw(X,y,w,beta,blocksize,cons,j)
 					i=0
 					(*data)=J(blocksize,newMtxCols,.)
 				}
 				++i
 			}
+
 			//This captures any overflow after last block (matrices aren't reset)
 			if	((*data)[.,1]!=J(blocksize,1,.)){
 				i=i-1
 				datap=&((*data)[1..i,.])
 
-				yp = &((*data)[.,Ypos])
-				Xp = & ((*data)[.,XPos])
-				wp = &((*data)[.,WPos])
-				j.W =j.W+quadcolsum(*wp)
-				j.N=j.N+i
+				yp = &((*data)[.,1])
+				Xp = &((*data)[.,2..Xlast])
+				wp = &((*data)[.,Wlast])
 
-				j=CLS_W(Xp,yp,wp,i,cons,j)
-			}
+				j=CLS_RFw(Xp,yp,wp,beta,blocksize,cons,j)
+			}			
 		}
 	}
 
@@ -388,71 +484,312 @@ struct resultsCLS matrix ols(string scalar filename,
 fclose(fh)
 return(j)
 }
-
-struct resultsCLS matrix olsR(string scalar filename,
-				pointer position,
-				real scalar K,
-				real scalar cons,
-				real scalar blocksize,
-				real scalar typeWeight,
-				struct resultsCLS scalar j)
+struct resultsCLS matrix olsCl(string scalar filename,
+							   pointer position,
+							   pointer beta,
+							   real scalar K,
+							   real scalar cons,
+							   real scalar blocksize,
+							   real scalar wMarker,
+							   real scalar typeWeight,
+							   real scalar sort)
 {
 	// General information from the model
-	real scalar	i
-	i=1
-	wMarker=rows(position)
-	newMtxCols=K+3
-	fh=*(position[1])
+	real scalar	i,itera
+	i=itera=1
+	fh = fopen(filename,"r")
+	names = fget(fh)
 
 	//Define data
-	data=&(J(blocksize,newMtxCols,.))
 	Ypos=*(position[2])
 	Xpos=*(position[3])
+	Xlast=K+2
+	newMtxCols=Xlast+wMarker
+	data=&(J(blocksize,newMtxCols,.))
+	clustersAccP=matStructCl(1,K) // Vectors containing the list of groups and their structures, prior to the loop
 
 	// Read in data
-	if(wMarker!=4){
-		while((line=fget(fh)) != J(0,0,"")) {
-			vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-			(*data)[i,.]=vecline
+	if (sort==0){
+		if(wMarker==0){
+			Clpos=*(position[4])
+			argPos=(Clpos,Ypos,Xpos)
+			while(itera<=blocksize){
+				line=fget(fh)
 
-			if (i==blocksize) {
-				y = &((*data)[.,Ypos])
-				X = &((*data)[.,Xpos])
-				j.N=j.N+i
-				
-				j=CLS(X,y,cons,j)
-				i=0
-				(*data)=J(blocksize,newMtxCols,.)
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
+				if (i==blocksize) {
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) // we have max ngroup new groups						
+					Gtp=&(J(ngroup,1,.))
+
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						(*Gtp)[l,1]=(*portion)[1,1]
+						groups=matStructCl(1,K) // new strucutre
+						clustersAccP=(clustersAccP \ groups)
+
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+						pos=l+1
+						clustersAccP[pos,1]=&CLS_Cl(X,y,beta,size,cons,*(clustersAccP[pos,1]))
+					}
+					i=0
+					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+				++itera
 			}
-			++i
-		}
-		//This captures any overflow after last block (matrices aren't reset)
-		if	((*data)[.,1]!=J(blocksize,1,.)){
-			i=i-1
-			datap=&((*data)[1..i,.])
+			i=1
+			clustersAccP=clustersAccP[2..ngroup+1,.]
 
-			yp = &((*data)[.,Ypos])
-			Xp = &((*data)[.,Xpos])
-			j.N=j.N+i
-			j=CLS(Xp,yp,cons,j)
+			// Read in data 
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
+
+				if (i==blocksize) {
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) //We have max ngroup new groups
+
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						add=vec_inlistOLS(Gtp,(*portion)[1,1]) // group already exist (1 & 0 Vector)
+
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+
+						if (add==J(rows(add),1,0)){
+							pos=rows(*Gtp)+1 // position for the new added group
+							pos
+							Gtp=&(*Gtp \ (*portion)[1,1])
+
+							groups=matStructCl(1,K) // new strucutre
+							clustersAccP=(clustersAccP \ groups)
+							clustersAccP[pos,1]=&CLS_Cl(X,y,beta,cons,size,*(clustersAccP[pos,1]))
+						}
+						else{
+							index=selectindex(add) // position of the group that existed (more info: help mata select)
+							groupsAccP[index,1]=&CLS_Cl(X,y,beta,cons,size,*(clustersAccP[index,1]))
+						}
+					}
+					i=0
+					i
+					(*data) = J(blocksize,newmatrixCols,.)
+				}
+				++i
+			}
+
+			//This captures any overflow after last block (matrices aren't reset)
+			if	((*data)[.,1]!=J(blocksize,1,.)){
+				i=i-1
+				dataP=&((*data)[1..i,.])
+				_sort(*dataP,1)
+				info=panelsetup(*dataP,1)
+				ngroup=rows(info)
+				for(l=1; l<=ngroup; l++) {
+					portion=&(panelsubmatrix(*dataP,l,info))
+					size=rows(*portion)
+					add=vec_inlistOLS(Gtp,(*portion)[1,1])
+
+					yp = &((*portion)[.,1])
+					Xp = &((*portion)[.,2..Xlast])
+
+					if (add==J(rows(add),1,0)){
+						pos=rows(*Gtp)+1
+						Gtp=&(*Gtp \ (*portion)[1,1])
+
+						groups=matStructCl(1,K)
+						clustersAccP=(groupsAccP \ groups)
+						clustersAccP[pos,1]=&CLS_Cl(Xp,yp,beta,size,cons,*(clustersAccP[pos,1]))
+					}
+					else{
+						index=selectindex(add)
+						clustersAccP[index,1]=&CLS_Cl(Xp,yp,beta,size,cons,*(clustersAccP[index,1]))
+					}
+				}
+			}
+		}
+		else{
+			Wpos=*(position[4])
+			argPos=(Clpos,Ypos,Xpos,Wpos)
+			Wlast=Xlast+1
+			while(itera<=blocksize){
+				line=fget(fh)
+
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
+
+				if (i==blocksize) {
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) // we have max ngroup new groups						
+					Gtp=&(J(ngroup,1,.))
+
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						(*Gtp)[l,1]=(*portion)[1,1]
+						groups=matStructCl(1,K) // new strucutre
+						clustersAccP=(clustersAccP \ groups)
+
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+						w = &((*portion)[.,Wlast])
+
+						pos=l+1
+						clustersAccP[pos,1]=&CLS_ClW(X,y,w,beta,size,cons,*(clustersAccP[pos,1]))
+					}
+					i=0
+					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+				++itera
+			}
+			i=1
+			clustersAccP=clustersAccP[2..ngroup+1,.]
+
+			// Read in data 
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
+
+				if (i==blocksize) {
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) //We have max ngroup new groups
+
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						add=vec_inlistOLS(Gtp,(*portion)[1,1]) // group already exist (1 & 0 Vector)
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+						w = &((*portion)[.,Wlast])
+
+						if (add==J(rows(add),1,0)){
+							pos=rows(*Gtp)+1 // position for the new added group
+							Gtp=&(*Gtp \ (*portion)[1,1])
+
+							groups=matStructCl(1,K) // new strucutre
+							clustersAccP=(clustersAccP \ groups)					
+							clustersAccP[pos,1]=&CLS_ClW(Xp,yp,beta,cons,size,*(clustersAccP[pos,1]),w)
+						}
+						else{
+							index=selectindex(add) // position of the group that existed (more info: help mata select)
+							clustersAccP[index,1]=&CLS_ClW(Xp,yp,beta,cons,size,*(clustersAccP[index,1]),w)
+						}
+					}
+					i=0
+					(*data) = J(blocksize,newmatrixCols,.)
+				}
+				++i
+			}
+
+			//This captures any overflow after last block (matrices aren't reset)
+			if	((*data)[.,1]!=J(blocksize,1,.)){
+				i=i-1
+				dataP=&((*data)[1..i,.])
+				_sort(*dataP,1)
+				info=panelsetup(*dataP,1)
+				ngroup=rows(info)
+				for(l=1; l<=ngroup; l++) {
+					portion=&(panelsubmatrix(*dataP,l,info))
+					size=rows(*portion)
+					add=vec_inlistOLS(Gtp,(*portion)[1,1])
+
+					yp = &((*portion)[.,2])
+					Xp = &((*portion)[.,3..Xlast])
+					wp = &((*portion)[.,Wlast])
+
+					if (add==J(rows(add),1,0)){
+						pos=rows(*Gtp)+1
+						Gtp=&(*Gtp \ (*portion)[1,1])
+
+						groups=matStructCl(1,K)
+						clustersAccP=(clustersAccP \ groups)
+						clustersAccP[pos,1]=&CLS_ClW(Xp,yp,beta,size,cons,*(clustersAccP[pos,1]),wp)
+					}
+					else{
+						index=selectindex(add)
+						clustersAccP[index,1]=&CLS_ClW(Xp,yp,beta,size,cons,*(clustersAccP[index,1]),wp)
+					}
+				}
+			}
 		}
 	}
 	else{
-		Wpos=*(position[4])
 		if(typeWeight==0){
-			while((line=fget(fh)) != J(0,0,"")) {
-				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-				(*data)[i,.]=vecline
-				if (i==blocksize) {
-				
-					y = &((*data)[.,Ypos])
-					X = &((*data)[.,Xpos])
-					w = &((*data)[.,Wpos])
-					j.N=j.N+i
+			argPos=(Clpos,Ypos,Xpos)
+			while(itera<=blocksize){
+				line=fget(fh)
 
-					j=CLS_W(X,y,w,cons,j)
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
+
+				if (i==blocksize) {
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) // we have max ngroup new groups						
+					Gtp=&(J(ngroup,1,.))
+
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						(*Gtp)[l,1]=(*portion)[1,1]
+						groups=matStructCl(1,K) // new strucutre
+						clustersAccP=(clustersAccP \ groups)
+
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+						pos=l+1
+						clustersAccP[pos,1]=&CLS_Cl(X,y,beta,size,cons,*(clustersAccP[pos,1]))
+					}
 					i=0
 					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+				++itera
+			}
+			i=1
+			clustersAccP=clustersAccP[2..ngroup+1,.]
+
+			// Read in data 
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
+
+				if (i==blocksize) {
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) //We have max ngroup new groups
+
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						add=vec_inlistOLS(Gtp,(*portion)[1,1]) // group already exist (1 & 0 Vector)
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+
+						if (add==J(rows(add),1,0)){
+							pos=rows(*Gtp)+1 // position for the new added group
+							Gtp=&(*Gtp \ (*portion)[1,1])
+
+							groups=matStructCl(1,K) // new strucutre
+							clustersAccP=(clustersAccP \ groups)					
+							clustersAccP[pos,1]=&CLS_Cl(Xp,yp,beta,cons,size,*(groupsAccP[pos,1]))
+						}
+						else{
+							index=selectindex(add) // position of the group that existed (more info: help mata select)
+							groupsAccP[index,1]=&CLS_Cl(Xp,yp,beta,cons,size,*(groupsAccP[index,1]))
+						}
+					}
+					i=0
+					(*data) = J(blocksize,newmatrixCols,.)
 				}
 				++i
 			}
@@ -460,325 +797,242 @@ struct resultsCLS matrix olsR(string scalar filename,
 			//This captures any overflow after last block (matrices aren't reset)
 			if	((*data)[.,1]!=J(blocksize,1,.)){
 				i=i-1
-				datap=&((*data)[1..i,.])
+				dataP=&((*data)[1..i,.])
+				_sort(*dataP,1)
+				info=panelsetup(*dataP,1)
+				ngroup=rows(info)
+				for(l=1; l<=ngroup; l++) {
+					portion=&(panelsubmatrix(*dataP,l,info))
+					size=rows(*portion)
+					add=vec_inlistOLS(Gtp,(*portion)[1,1])
 
-				yp = &((*data)[.,Ypos])
-				Xp = &((*data)[.,Xpos])
-				wp = &((*data)[.,Wpos])
-				j.N=j.N+i
+					yp = &((*portion)[.,1])
+					Xp = &((*portion)[.,2..Xlast])
 
-				j=CLS_W(Xp,yp,wp,cons,j)
+					if (add==J(rows(add),1,0)){
+						pos=rows(*Gtp)+1
+						Gtp=&(*Gtp \ (*portion)[1,1])
+
+						groups=matStructCl(1,K)
+						clustersAccP=(groupsAccP \ groups)
+						clustersAccP[pos,1]=&CLS_Cl(Xp,yp,beta,size,cons,*(clustersAccP[pos,1]))
+					}
+					else{
+						index=selectindex(add)
+						clustersAccP[index,1]=&CLS_Cl(Xp,yp,beta,size,cons,*(clustersAccP[index,1]))
+					}
+				}
 			}
 		}
 		else{
-			j.W= 0
-			while((line=fget(fh)) != J(0,0,"")) {
+			Wpos=*(position[4])
+			argPos=(Clpos,Ypos,Xpos,Wpos)
+			Wlast=Xlast+1
+			while(itera<=blocksize){
+				line=fget(fh)
+
 				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
-				(*data)[i,.]=vecline
+				(*data)[i,.]=vecline[argPos]
 
 				if (i==blocksize) {
-					y = &((*data)[.,Ypos])
-					X = &((*data)[.,Xpos])
-					w = &((*data)[.,Wpos])
-					
-					j.W=j.W+quadcolsum(*w)
-					j.N=j.N+i
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) // we have max ngroup new groups						
+					Gtp=&(J(ngroup,1,.))
 
-					j=CLS_W(X,y,w,cons,j)
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						(*Gtp)[l,1]=(*portion)[1,1]
+						groups=matStructCl(1,K) // new strucutre
+						clustersAccP=(clustersAccP \ groups)
+
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+						w = &((*portion)[.,Wlast])
+
+						pos=l+1
+						clustersAccP[pos,1]=&CLS_ClW(X,y,w,beta,size,cons,*(clustersAccP[pos,1]))
+					}
 					i=0
 					(*data)=J(blocksize,newMtxCols,.)
+				}
+				++i
+				++itera
+			}
+			i=1
+			clustersAccP=clustersAccP[2..ngroup+1,.]
+
+			// Read in data 
+			while((line=fget(fh)) != J(0,0,"")) {
+				vecline	= strtoreal(tokens(subinstr(line,",", " ")))
+				(*data)[i,.]=vecline[argPos]
+
+				if (i==blocksize) {
+					_sort(*data,1)
+					info=&(panelsetup(*data,1))
+					ngroup=rows(*info) //We have max ngroup new groups
+
+					for(l=1; l<=ngroup; l++) {
+						portion=&(panelsubmatrix(*data,l,*info))
+						size=rows(*portion)
+						add=vec_inlistOLS(Gtp,(*portion)[1,1]) // group already exist (1 & 0 Vector)
+						y = &((*portion)[.,2])
+						X = &((*portion)[.,3..Xlast])
+						w = &((*portion)[.,Wlast])
+
+						if (add==J(rows(add),1,0)){
+							pos=rows(*Gtp)+1 // position for the new added group
+							Gtp=&(*Gtp \ (*portion)[1,1])
+
+							groups=matStructCl(1,K) // new strucutre
+							clustersAccP=(clustersAccP \ groups)					
+							clustersAccP[pos,1]=&CLS_ClW(Xp,yp,beta,cons,size,*(clustersAccP[pos,1]),w)
+						}
+						else{
+							index=selectindex(add) // position of the group that existed (more info: help mata select)
+							clustersAccP[index,1]=&CLS_ClW(Xp,yp,beta,cons,size,*(clustersAccP[index,1]),w)
+						}
+					}
+					i=0
+					(*data) = J(blocksize,newmatrixCols,.)
 				}
 				++i
 			}
 			//This captures any overflow after last block (matrices aren't reset)
 			if	((*data)[.,1]!=J(blocksize,1,.)){
 				i=i-1
-				datap=&((*data)[1..i,.])
+				dataP=&((*data)[1..i,.])
+				_sort(*dataP,1)
+				info=panelsetup(*dataP,1)
+				ngroup=rows(info)
+				for(l=1; l<=ngroup; l++) {
+					portion=&(panelsubmatrix(*dataP,l,info))
+					size=rows(*portion)
+					add=vec_inlistOLS(Gtp,(*portion)[1,1])
 
-				yp = &((*data)[.,Ypos])
-				Xp = & ((*data)[.,XPos])
-				wp = &((*data)[.,WPos])
-				j.W =j.W+quadcolsum(*wp)
-				j.N=j.N+i
+					yp = &((*portion)[.,2])
+					Xp = &((*portion)[.,3..Xlast])
+					wp = &((*portion)[.,Wlast])
 
-				j=CLS_W(Xp,yp,wp,i,cons,j)
+					if (add==J(rows(add),1,0)){
+						pos=rows(*Gtp)+1
+						Gtp=&(*Gtp \ (*portion)[1,1])
+
+						groups=matStructCl(1,K)
+						clustersAccP=(clustersAccP \ groups)
+						clustersAccP[pos,1]=&CLS_ClW(Xp,yp,beta,size,cons,*(clustersAccP[pos,1]),wp)
+					}
+					else{
+						index=selectindex(add)
+						clustersAccP[index,1]=&CLS_ClW(Xp,yp,beta,size,cons,*(clustersAccP[index,1]),wp)
+					}
+				}
 			}
 		}
 	}
-
 // Close file, return struct j
 fclose(fh)
 return(j)
 }
-
-// struct resultsCLS matrix clusterFunOLS(pointer data,
-// 						string scalar filename,
-// 						string scalar arglist,
-// 						string scalar weight,
-// 						string scalar absorb,
-// 						real scalar K,
-// 						real scalar cons,
-// 						real scalar blocksize,
-// 						real scalar sort)
-// {
-// 	real scalar	i,itera
-// 	i=itera=1
-// 	fh = fopen(filename,"r")
-// 	names = fget(fh)
-// 	dataNames=tokens(subinstr(names,",", " "))	// Names from textfile
-// 	userNames=tokens(arglist)			// Names from user
-// 	weightName=tokens(weight)			// Name  from weight
-// 	FeName=tokens(absorb)				// Name  from Fe
-//
-// 	varIdx=_aandb(dataNames,userNames)		// Match btw (index)
-// 	wgtIdx=_aandb(dataNames,weightName)
-// 	FeIdx=_aandb(dataNames,FeName)
-//
-// 	varPos=selectindex(varIdx)			// Positions
-// 	XPos=varPos[.,2..K+1]
-// 	Ypos=varPos[.,1]
-// 	Wpos=selectindex(wgtIdx)
-// 	FePos=selectindex(FeIdx)
-//
-// 	// Vectors that contains the list of groups and their structures. Before the loop
-// 	groupsAccP=locationOLS(1,K,cons)
-// 	newmatrixCols=K+1+2
-//
-// 	// We can save time if the data is already sorted
-// 	if (sort==0){
-// 		while(itera<=blocksize){
-// 			line=fget(fh)
-// 			vecline  = strtoreal(tokens(subinstr(line,",", " ")))
-// 			(*data)[i,.]=vecline
-// 			if (i==blocksize) {
-// 				_sort(*data,FePos)
-// 				info=&(panelsetup(*data,FePos))
-// 				ngroup=rows(*info) //We have max ngroup new groups						
-// 				Gtp=&(J(ngroup,1,.))
-//
-// 				for(l=1; l<=ngroup; l++) {
-// 					portion=&(panelsubmatrix(*data,l,*info))
-// 					size=rows(*portion)
-// 					(*Gtp)[l,1]=(*portion)[1,FePos]
-// 					groups=locationOLS(1,K,cons) // new strucutre
-// 					groupsAccP=(groupsAccP \ groups)
-//					
-// 					yp=&((*portion)[.,Ypos])
-// 					Xp=&((*portion)[.,XPos])
-// 					wp=&((*portion)[.,Wpos])
-//
-// 					pos=l+1
-// 					groupsAccP[pos,1]=&updateCLS(Xp,yp,wp,size,cons,*(groupsAccP[pos,1]))
-// 				}
-// 				i=0
-// 				(*data) = J(blocksize,newmatrixCols,.)
-// 			}
-// 			++i
-// 			++itera
-// 		}
-// 		i=1
-// 		groupsAccP=groupsAccP[2..ngroup+1,.]
-//
-// 		// Read in data 
-// 		while((line=fget(fh)) != J(0,0,"")){
-// 			vecline  = strtoreal(tokens(subinstr(line,",", " ")))
-// 			(*data)[i,.]=vecline
-// 			if (i==blocksize) {
-// 				_sort(*data,FePos)
-// 				info=&(panelsetup(*data,FePos))
-// 				ngroup=rows(*info) //We have max ngroup new groups
-//
-// 				for(l=1; l<=ngroup; l++) {
-// 					portion=&(panelsubmatrix(*data,l,*info))
-// 					size=rows(*portion)
-// 					add=vec_inlistOLS(Gtp,(*portion)[1,FePos]) // group already exist (1 & 0 Vector)
-//
-// 					yp=&((*portion)[.,Ypos])
-// 					Xp=&((*portion)[.,XPos])
-// 					wp=&((*portion)[.,Wpos])
-//
-// 					if (add==J(rows(add),1,0)){
-// 						pos=rows(*Gtp)+1 // position for the new added group
-// 						Gtp=&(*Gtp \ (*portion)[1,FePos])
-//
-// 						groups=locationOLS(1,K,cons) // new strucutre
-// 						groupsAccP=(groupsAccP \ groups)					
-// 						groupsAccP[pos,1]=&updateCLS(Xp,yp,wp,size,cons,*(groupsAccP[pos,1]))
-// 					}
-// 					else{
-// 						index=selectindex(add) // position of the group that existed (more info: help mata select)
-// 						groupsAccP[index,1]=&updateCLS(Xp,yp,wp,size,cons,*(groupsAccP[index,1]))
-// 					}
-// 				}
-// 				i=0
-// 				(*data) = J(blocksize,newmatrixCols,.)
-// 			}
-// 			++i
-// 		}
-//
-// 		if	((*data)[.,1]!=J(blocksize,1,.)){
-// 			i=i-1
-// 			dataP=&((*data)[1..i,.])
-// 			_sort(*dataP,FePos)
-// 			info=panelsetup(*dataP,FePos)
-// 			ngroup=rows(info)
-//
-// 			for(l=1; l<=ngroup; l++) {
-// 				portion=&(panelsubmatrix(*dataP,l,info))
-// 				size=rows(*portion)
-// 				add=vec_inlistOLS(Gtp,(*portion)[1,FePos])
-//				
-// 				y=&((*portion)[.,Ypos])
-// 				X=&((*portion)[.,XPos])
-// 				w=&((*portion)[.,Wpos])
-//
-// 				if (add==J(rows(add),1,0)){
-// 					pos=rows(*Gtp)+1
-// 					Gtp=&(*Gtp \ (*portion)[1,FePos])
-//
-// 					groups=locationOLS(1,K,cons)
-// 					groupsAccP=(groupsAccP \ groups)
-// 					groupsAccP[pos,1]=&updateCLS(X,y,w,size,cons,*(groupsAccP[pos,1]))
-// 				}
-// 				else{
-// 					index=selectindex(add)
-// 					groupsAccP[index,1]=&updateCLS(X,y,w,size,cons,*(groupsAccP[index,1]))
-// 				}
-// 			}				
-// 		};
-// 	}
-// 	else {
-// 		while(itera<=blocksize){
-// 			line=fget(fh)
-// 			vecline  = strtoreal(tokens(subinstr(line,",", " ")))
-// 			(*data)[i,.]=vecline
-//			
-// 			if (i==blocksize) {
-// 				info=&(panelsetup(*data,1))
-// 				ngroup=rows(*info) //We have max ngroup new groups						
-// 				Gtp=&(J(ngroup,1,.))
-//
-// 				for(l=1; l<=ngroup; l++) {
-// 					portion=&(panelsubmatrix(*data,l,*info))
-// 					size=rows(*portion)
-// 					(*Gtp)[l,1]=(*portion)[1,1]
-// 					groups=locationOLS(1,K,cons) // new strucutre
-// 					groupsAccP=(groupsAccP \ groups)
-//					
-// 					yp = &((*portion)[.,2])
-// 					Xp = &((*portion)[.,3..XFnlPos])
-// 					wp = &((*portion)[.,WFnlPos])
-// 					pos=l+1
-// 					groupsAccP[pos,1]=&updateCLS(Xp,yp,size,cons,*(groupsAccP[pos,1]),wp)
-// 				}
-// 				i=0
-// 				(*data) = J(blocksize,newmatrixCols,.)
-// 			}
-// 			++i
-// 			++itera
-// 		}
-// 		i=1
-// 		groupsAccP=groupsAccP[2..ngroup+1,.]
-//
-// 		// Read in data 
-// 		while((line=fget(fh)) != J(0,0,"")){
-// 			vecline  = strtoreal(tokens(subinstr(line,",", " ")))
-// 			(*data)[i,.]=vecline
-// 			if (i==blocksize) {
-// 				info=&(panelsetup(*data,1))
-// 				ngroup=rows(*info) //We have max ngroup new groups
-//
-// 				for(l=1; l<=ngroup; l++) {
-// 					portion=&(panelsubmatrix(*data,l,*info))
-// 					size=rows(*portion)
-// 					add=vec_inlistOLS(Gtp,(*portion)[1,1]) // group already exist (1 & 0 Vector)
-// 					yp = &((*portion)[.,2])
-// 					Xp = &((*portion)[.,3..XFnlPos])
-// 					wp = &((*portion)[.,WFnlPos])
-//
-// 					if (add==J(rows(add),1,0)){
-// 						pos=rows(*Gtp)+1 // position for the new added group
-// 						Gtp=&(*Gtp \ (*portion)[1,1])
-//
-// 						groups=locationOLS(1,K,cons) // new strucutre
-// 						groupsAccP=(groupsAccP \ groups)					
-// 						groupsAccP[pos,1]=&updateCLS(Xp,yp,size,cons,*(groupsAccP[pos,1]),wp)
-// 					}
-// 					else{
-// 						index=selectindex(add) // position of the group that existed (more info: help mata select)
-// 						groupsAccP[index,1]=&updateCLS(Xp,yp,size,cons,*(groupsAccP[index,1]),wp)
-// 					}
-// 				}
-// 				i=0
-// 				(*data) = J(blocksize,newmatrixCols,.)
-// 			}
-// 			++i
-// 		}
-//
-// 		if	((*data)[.,1]!=J(blocksize,1,.)){
-// 			i=i-1
-// 			dataP=&((*data)[1..i,.])
-// 			info=panelsetup(*dataP,1)
-// 			ngroup=rows(info)
-//
-// 			for(l=1; l<=ngroup; l++) {
-// 				portion=&(panelsubmatrix(*dataP,l,info))
-// 				size=rows(*portion)
-// 				add=vec_inlistOLS(Gtp,(*portion)[1,1])
-//				
-// 				y = &((*portion)[.,2])
-// 				X = &((*portion)[.,3..XFnlPos])
-// 				w = &((*portion)[.,WFnlPos])
-//
-// 				if (add==J(rows(add),1,0)){
-// 					pos=rows(*Gtp)+1
-// 					Gtp=&(*Gtp \ (*portion)[1,1])
-//
-// 					groups=locationOLS(1,K,cons)
-// 					groupsAccP=(groupsAccP \ groups)
-// 					groupsAccP[pos,1]=&updateCLS(X,y,size,cons,*(groupsAccP[pos,1]),w)
-// 				}
-// 				else{
-// 					index=selectindex(add)
-// 					groupsAccP[index,1]=&updateCLS(X,y,size,cons,*(groupsAccP[index,1]),w)
-// 				}
-// 			}				
-// 		};
-// 	}
-//
-// 	// Close file, return struct j
-// 	fclose(fh)
-// 	return(groupsAccP)
-// }
-
 struct resultsCLS scalar CLS(pointer X,
 							 pointer y,
 							 real scalar cons,
+							 real scalar N,
 							 struct resultsCLS scalar r)
 {
-	struct resultsCLS scalar a
 	r.Xy  =r.Xy+quadcross(*X,cons,*y,0)
 	r.XX  =r.XX+quadcross(*X,cons,*X,cons)
 	r.yy  =r.yy+quadcross(*y,*y)
+	r.size=r.size+N
 	return(r)
 }
-
-struct resultsCLS scalar CLS_W(	pointer X,
+struct resultsCLS scalar CLS_W(pointer X,
 								pointer y,
 								pointer w,
 								real scalar cons,
+								real scalar N,
 								struct resultsCLS scalar r)
 {
 	r.Xy  =r.Xy+quadcross(*X,cons,*w,*y,0)
 	r.XX  =r.XX+quadcross(*X,cons,*w,*X,cons)
 	r.yy  =r.yy+quadcross(*y,*w,*y)
-// 	a.W   =r.W+quadcolsum(*w)
-// 	a.Ybar=r.Ybar+quadcross(*w,*y)
-// 	a.Xbar=r.Xbar+quadcross(*w,*X)
+	r.size=r.size+N
 	return(r)
 }
-
-
+struct resultsCLS scalar CLS_R(pointer X,
+							   pointer y,
+							   pointer beta,
+							   real scalar blocksize,
+							   real scalar cons,
+							   struct resultsCLS scalar r)
+{
+	Xtemp =	&(*X,J(blocksize,cons,1))
+	uR = &(*y - *Xtemp*(*beta))
+	uR2= &(*uR:^2)
+	r.XX = r.XX + quadcross(*Xtemp,*uR2,*Xtemp)
+	return(r)
+}
+struct resultsCLS scalar CLS_RFw(pointer X,
+							    pointer y,
+							    pointer w,
+								pointer beta,
+								real scalar blocksize,
+							    real scalar cons,
+							    struct resultsCLS scalar r)
+{
+	Xtemp =	&(*X,J(blocksize,cons,1))
+	XW = &(sqrt(*w):**Xtemp)
+	uR = &(sqrt(*w):**y - *XW*(*beta))
+	uR2= &(*uR:^2)
+	r.XX = r.XX + quadcross(*Xtemp,*uR2,*Xtemp)
+	return(r)
+}
+struct resultsCLS scalar CLS_RAw(pointer X,
+							    pointer y,
+							    pointer w,
+								pointer beta,
+								real scalar blocksize,
+							    real scalar cons,
+							    struct resultsCLS scalar r)
+{
+	Xtemp =	&(*X,J(blocksize,cons,1))
+	XW = &(sqrt(*w):**Xtemp)
+	uR = &(sqrt(*w):**y - *XW*(*beta))
+	uR2= &(*uR:^2)
+	r.XX = r.XX + quadcross(*XW,*uR2,*XW)
+	return(r)
+}
+struct resultsCLS scalar CLS_Cl(pointer X,
+								pointer y,
+								pointer beta,
+								real scalar blocksize,
+								real scalar cons,
+								struct resultsCLS scalar r)
+{
+	Xtemp =	&(*X,J(blocksize,cons,1))
+	uR = &(*y - *Xtemp*(*beta))
+	uR2= &(*uR:^2)
+	r.XX = r.XX + quadcross(*Xtemp,*uR2,*Xtemp)
+	r.size=r.size+blocksize
+	return(r)
+}
+struct resultsCLS scalar CLS_ClW(pointer X,
+								 pointer y,
+								 pointer w,
+								 pointer beta,
+								 real scalar blocksize,
+								 real scalar cons,
+								 struct resultsCLS scalar r)
+{
+	Xtemp =	&(*X,J(blocksize,cons,1))
+	XW = &(sqrt(*w):**Xtemp)
+	uR = &(sqrt(*w):**y - *XW*(*beta))
+	uR2= &(*uR:^2)
+	r.XX = r.XX + quadcross(*XW,*uR2,*XW)
+	r.size=r.size+blocksize
+	return(r)
+}
 real rowvector inlist_aposb(rowvector B, rowvector A)
 {
     real scalar                                     i
@@ -799,31 +1053,39 @@ real rowvector inlist_aposb(rowvector B, rowvector A)
     }
     return(R)
 }
-struct resultsCLS matrix locationOLS(scalar Tgroup, scalar K, scalar cons) 
+real colvector vec_inlistOLS(pointer B, colvector L)
+{
+    real colvector b, l
+    real scalar minrows, answer
+    
+    b = J(max(*B), 1, 0)
+    b[*B] = J(rows(*B), 1, 1)
+    
+    l = J(max(L), 1, 0)
+    l[L] = J(rows(L), 1, 1)
+    
+    minrows = min((rows(b), rows(l)))
+    answer = J(rows(b), 1, 0)
+    answer[|1, 1 \ minrows, 1 |] =
+        b[|1, 1 \ minrows, 1 |] :* l[|1, 1 \ minrows, 1 |]
+    
+    answer= answer[*B]
+    return(answer)
+}
+struct resultsCLS matrix matStructCl(scalar Tgroup, scalar K) 
 {
 	real scalar j
 	pointer(struct resultsCLS scalar) matrix Index
-	covs=K+cons
+	covs=K+1
 	
 	Index = &(resultsCLS())
-	Index[1,1]->XX	= J(covs,covs,0)
-	Index[1,1]->Xy	= J(covs,1,0)
-	Index[1,1]->Xbar= J(1,K,0)
-	Index[1,1]->yy	= 0
-	Index[1,1]->Ybar= 0	
-	Index[1,1]->N	= 0
-	Index[1,1]->W	= 0
+	Index[1,1]->XX	 = J(covs,covs,0)
+	Index[1,1]->size = 0
 	if (Tgroup>1) {
 		for (j=2; j<=Tgroup; j++) {
 			Index = (Index \ &(resultsCLS()))
-
-			Index[j,1]->XX  = J(covs,covs,0)
-			Index[j,1]->Xy  = J(covs,1,0)
-			Index[j,1]->Xbar= J(1,K,0)
-			Index[j,1]->yy  = 0
-			Index[j,1]->Ybar= 0	
-			Index[j,1]->N   = 0
-			Index[j,1]->W   = 0
+			Index[j,1]->XX   = J(covs,covs,0)
+			Index[j,1]->size = 0
 		}
 	}
 	return(Index)

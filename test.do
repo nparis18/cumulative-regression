@@ -25,7 +25,7 @@ gl data  "${direc}/data"
 sysuse auto
 label drop _all
 keep price mpg length weight turn
-order price length mpg 
+*order price length mpg 
 export delimited using "$data/testData.raw", delim(",") replace nolabel
 
 * Run command
@@ -38,9 +38,6 @@ gl blocksize=10
 * Testing
 *******************************************************************************
 
-cumulativels price length mpg, filename("$data/testData.raw") blocksize($blocksize) nocons
-reg price length mpg,nocon
+cumulativels length price mpg, filename("$data/testData.raw") blocksize($blocksize) cluster(turn)
 
-cumulativels price mpg length, filename("$data/testData.raw") blocksize($blocksize) aw(weight) nocons
-
-reg price length mpg [aw=weight], nocons
+reg length price mpg [aw=weight], r
