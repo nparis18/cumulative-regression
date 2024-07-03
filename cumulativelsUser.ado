@@ -1,5 +1,6 @@
 cap program drop cumulativels innerCumulativels
 
+*Pulling variable and weight names that fit with Stata's syntax
 program cumulativels, eclass
 version 15.0
 if ustrregexm("`*'", "^(.*?)\,"){
@@ -7,15 +8,15 @@ if ustrregexm("`*'", "^(.*?)\,"){
 	if ustrregexm("`variables'", "\[(.*?)\]"){
    		local match "`=ustrregexs(1)'"
 		local namelist = subinstr("`variables'", "[`match']", "",.)
-		local arguments "`namelist' (`match')"
+		local arguments "`namelist' (`match')" // var names
 	}
 	else{
-		local arguments "`variables'"
+		local arguments "`variables'" // var names
 	}
 }
 if ustrregexm("`*'", "\,(.*)"){
 	local options "`=ustrregexs(1)'"
-	innerCumulativels `arguments',`options'
+	innerCumulativels `arguments',`options' // runs the cumulative process
 }
 end
 
@@ -93,18 +94,66 @@ else{
 mata: A=runcls("`filename'","`arglist'","`weight'","`absorb'","`cluster'",`blocksize',`K',`nocons',`sort',`typeWeight',`wMarker',`clMarker',`rMarker');
 #delimit cr
 
+// Main Table arguments
 mata: betas=(*((*(A[1]))[1]))'
 mata: vcov=*((*(A[1]))[2])
-mata: N=*(A[2])
+mata: N=*((*(A[1]))[3])
 
 mata: st_matrix("b", betas)
 mata: st_matrix("V", vcov)
-mata: st_local("N", strofreal(N))
+mata: st_numscalar("N", N)
+local N=N
 
+if `rMarker'==0{
+	// Upper right table arguments
+	// SS
+	mata: SSm=*((*(A[2]))[1])
+	mata: SSr=*((*(A[2]))[2])
+	mata: SSt=*((*(A[2]))[3])
+	mata: st_numscalar("SSm", SSm)
+	mata: st_numscalar("SSr", SSr)
+	mata: st_numscalar("SSt", SSt)
+
+	// df
+	mata: df_m=*((*(A[2]))[4])
+	mata: df_r=*((*(A[2]))[5])
+	mata: df_t=*((*(A[2]))[6])
+	mata: st_numscalar("df_m", df_m)
+	mata: st_numscalar("df_r", df_r)
+	mata: st_numscalar("df_t", df_t)
+
+	// MS
+	mata: MSm=*((*(A[2]))[7])
+	mata: MSr=*((*(A[2]))[8])
+	mata: MSt=*((*(A[2]))[9])
+	mata: st_numscalar("MSm",  MSm)
+	mata: st_numscalar("MSr",  MSr)
+	mata: st_numscalar("MSt",  MSt)
+
+	// Upper left table arguments
+	mata: F=*((*(A[3]))[1])
+	mata: R2=*((*(A[3]))[2])
+	mata: R2Adj=*((*(A[3]))[3])
+	mata: rmse=*((*(A[3]))[4])
+	mata: st_numscalar("F",  F)
+	mata: st_numscalar("R2",  R2)
+	mata: st_numscalar("R2Adj", R2Adj)
+	mata: st_numscalar("rmse", rmse)
+
+	//Upper Table
+	di as text ""
+	di as text %12s abbrev("Source",12) _skip(1) "{c |}"_skip(7)"SS"_skip(11)"df"_skip(7)"MS"_skip(6)"Number of obs   ="_skip(7) as result `N'
+	di as text "{hline 13}{c +}{hline 34}   F(" as result df_m as text "," as result df_r as text")         ="_skip(0) as result %9.2f F
+	di as text %12s abbrev("Model",12) " {c |}  "    as result %10.4f SSm %10.0f df_m %10.4f MSm _skip(1) as text "    Prob > F        ="
+	di as text %12s abbrev("Residual",12) " {c |}  " as result %10.4f SSr %10.0f df_r %11.6f MSr _skip(1) as text "   R-squared       ="as result %9.4f R2
+	di as text "{hline 13}{c +}{hline 34}   Adj R-squared   ="as result %9.4f R2Adj
+	di as text %12s abbrev("Total",12) " {c |}  "    as result %10.4f SSt %10.0f df_t %11.6f MSt _skip(1) as text "   Root MSE        ="as result %9.2f rmse
+	di as text ""
+}
+// Main Table
 matrix colnames b = `Xlist'
 matrix colnames V = `Xlist'
 matrix rownames V = `Xlist'
-
 ereturn post b V, dep(`Ylist') obs(`N')
 ereturn display
 end
@@ -144,9 +193,9 @@ function runcls(string scalar filename,	// File containing data
 
 	// General stucture
 	struct resultsCLS scalar r
-	r.yy=r.size	= 0
-	r.Xy		= J(covs,1,0)
-	r.XX		= J(covs,covs,0)
+	r.yy=r.size=r.Ybar= 0
+	r.Xy			= J(covs,1,0)
+	r.XX			= J(covs,covs,0)
 
 	txtPos=inputs(filename,arglist,weight,absorb,cluster,K)
 
@@ -161,8 +210,9 @@ function runcls(string scalar filename,	// File containing data
 		beta=&(*XXinv*r.Xy)
 
 		// non-redundant degrees of freedom?
-		KStd=&(colsum((*beta:!=0)))
-
+		nK=&(colsum((*beta:!=0)))
+		df_r=&(r.size-*nK)
+	
 		// standard error type
 
 		if (rMarker==1|clMarker==1){
@@ -171,7 +221,7 @@ function runcls(string scalar filename,	// File containing data
 				r2.XX= J(covs,covs,0)
 				r2=olsR(filename,txtPos,beta,K,cons,blocksize,wMarker,typeWeight,r2)
 				uPuR=&(*XXinv*r2.XX**XXinv)
-				vcov=&(((r.size)/(r.size-*KStd))**uPuR)
+				vcov=&(((r.size)/(*df_r))**uPuR)
 			}
 			else {
 				sdCluster=olsCl(filename,txtPos,beta,K,cons,blocksize,wMarker,typeWeight,sort)
@@ -188,18 +238,42 @@ function runcls(string scalar filename,	// File containing data
 					omegaG= &(quadcross(*XgugT,*XgugT))
 					omegaT=&(*omegaT + *omegaG)
 				}
-				vcov = &((r.size-1)/(r.size-*KStd)*(Ng/(Ng-1))**XXinv**omegaT**XXinv)
+				vcov = &((r.size-1)/(*df_r)*(Ng/(Ng-1))**XXinv**omegaT**XXinv)
 			}
 		}
 		else{
 			// 'U = (yy - 2BXy) +  B*X'X*B
-			uPu= &(r.yy - 2*(*beta)'*r.Xy + (*beta)'*r.XX**beta)
-			vcov=&(((*uPu)/(r.size-*KStd))**XXinv)
+			SSr= &(r.yy - 2*(*beta)'*r.Xy + (*beta)'*r.XX**beta)
+			vcov=&(((*SSr)/(*df_r))**XXinv)
 		}
 	}
-	outputMain=&(beta,vcov)
-	outputArg=&(r.size)
-	output=(outputMain,outputArg)
+
+	// Upper left table
+	// SS
+	SSt=&((r.yy-(r.Ybar)/r.size)^2)
+	SSm=&(*SSt-*SSr)
+
+	// df
+	df_m=&(K)
+	df_t=&(*df_m+*df_r)
+
+	// MS
+	MSm=&(*SSm/(*df_m))
+	MSr=&(*SSr/(*df_r))
+	MSt=&(*SSt/(*df_t))
+
+	// Upper right table
+	rmse=&(sqrt(*MSr))
+	N=&(r.size)
+	R2=&(1-(*SSr/(*SSt)))
+	R2Adj=&(1-((1-*R2)*(*N-1)/(*N-K-1)))
+
+	F=&(*MSm/(*MSr))
+	outputURTable=&(F,R2,R2Adj,rmse)
+
+	outputMain=&(beta,vcov,N)
+	outputULTable=&(SSm,SSr,SSt,df_m,df_r,df_t,MSm,MSr,MSt)
+	output=(outputMain,outputULTable,outputURTable)
 	return(output)
 }
 
@@ -748,6 +822,7 @@ struct resultsCLS scalar CLS(pointer X,
 	r.Xy  =r.Xy+quadcross(*X,cons,*y,0)
 	r.XX  =r.XX+quadcross(*X,cons,*X,cons)
 	r.yy  =r.yy+quadcross(*y,*y)
+	r.Ybar=r.Ybar+quadcolsum(*y)
 	r.size=r.size+N
 	return(r)
 }
